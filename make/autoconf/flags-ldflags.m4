@@ -173,6 +173,13 @@ AC_DEFUN([FLAGS_SETUP_LDFLAGS_CPU_DEP],
     if test "x${OPENJDK_$1_CPU}" = "xx86"; then
       $1_CPU_LDFLAGS="-safeseh"
     fi
+
+  elif test "x$TOOLCHAIN_TYPE" = xclang; then
+    if test "x$OPENJDK_TARGET_OS" = xmacosx; then
+      if test "x${OPENJDK_$1_CPU}" = xaarch64; then
+        $1_CPU_LDFLAGS="${$1_CPU_LDFLAGS} -arch arm64"
+      fi
+    fi
   fi
 
   # JVM_VARIANT_PATH depends on if this is build or target...
@@ -185,7 +192,7 @@ AC_DEFUN([FLAGS_SETUP_LDFLAGS_CPU_DEP],
 
   # Export variables according to old definitions, prefix with $2 if present.
   LDFLAGS_JDK_COMMON="$BASIC_LDFLAGS $BASIC_LDFLAGS_JDK_ONLY \
-      $OS_LDFLAGS_JDK_ONLY $DEBUGLEVEL_LDFLAGS_JDK_ONLY ${$2EXTRA_LDFLAGS}"
+      ${$1_CPU_LDFLAGS} $OS_LDFLAGS_JDK_ONLY $DEBUGLEVEL_LDFLAGS_JDK_ONLY ${$2EXTRA_LDFLAGS}"
   $2LDFLAGS_JDKLIB="$LDFLAGS_JDK_COMMON $BASIC_LDFLAGS_JDK_LIB_ONLY \
       ${$1_LDFLAGS_JDK_LIBPATH} $SHARED_LIBRARY_FLAGS"
   $2LDFLAGS_JDKEXE="$LDFLAGS_JDK_COMMON $EXECUTABLE_LDFLAGS \

@@ -33,6 +33,23 @@
 
 // returns 107 for Lion, 106 for SnowLeopard etc.
 int getOSXMajorVersion() {
+
+#ifdef __arm64__
+
+    NSOperatingSystemVersion osInfo = [NSProcessInfo processInfo].operatingSystemVersion;
+
+    // multiply the major version by 10^(num digits in minor version) and then add the minor version
+    // 10.1 is 10 * 10^1 + 1 = 101, 10.15 is 10 * 10^2 + 15 = 1015
+    int major = osInfo.majorVersion * 10;
+    int minor = osInfo.minorVersion;
+    while (minor > 9) {
+        minor /= 10;
+        major *= 10;
+    }
+    return major + osInfo.minorVersion;
+
+#else
+
     char *ver = JRSCopyOSVersion();
     if (ver == NULL) {
         return 0;
@@ -54,6 +71,8 @@ int getOSXMajorVersion() {
     free(ver);
 
     return v;
+
+#endif
 }
 
 BOOL isSnowLeopardOrLower() {

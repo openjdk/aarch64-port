@@ -25,5 +25,5 @@
 
 // Support for detecting Mac OS X versions
 
-double getOSXMajorVersion();
+int getOSXMajorVersion();
 BOOL isSnowLeopardOrLower();
