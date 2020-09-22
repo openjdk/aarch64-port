@@ -111,6 +111,7 @@
 #define context_sp   uc_mcontext->DU3_PREFIX(ss,sp)
 #define context_pc   uc_mcontext->DU3_PREFIX(ss,pc)
 #define context_cpsr uc_mcontext->DU3_PREFIX(ss,cpsr)
+#define context_esr  uc_mcontext->DU3_PREFIX(es,esr)
 
 address os::current_stack_pointer() {
 #if defined(__clang__) || defined(__llvm__)
@@ -357,6 +358,24 @@ JVM_handle_bsd_signal(int sig,
           // to handle_unexpected_exception way down below.
           overflow_state->disable_stack_red_zone();
           tty->print_raw_cr("An irrecoverable stack overflow has occurred.");
+        } else {
+          // Accessing stack address below sp may cause SEGV if current
+          // thread has MAP_GROWSDOWN stack. This should only happen when
+          // current thread was created by user code with MAP_GROWSDOWN flag
+          // and then attached to VM. See notes in os_linux.cpp.
+          if (thread->osthread()->expanding_stack() == 0) {
+             assert(false, "not sure");
+#if 0
+             thread->osthread()->set_expanding_stack();
+             if (os::Bsd::manually_expand_stack(thread, addr)) {
+               thread->osthread()->clear_expanding_stack();
+               return 1;
+             }
+             thread->osthread()->clear_expanding_stack();
+#endif
+          } else {
+             fatal("recursive segv. expanding stack.");
+          }
         }
       }
     }
@@ -372,10 +391,10 @@ JVM_handle_bsd_signal(int sig,
       Thread::WXWriteFromExecSetter wx_write;
 
       // Handle signal from NativeJump::patch_verified_entry().
-      if ((sig == SIGILL)
+      if ((sig == SIGILL || sig == SIGTRAP)
           && nativeInstruction_at(pc)->is_sigill_zombie_not_entrant()) {
         if (TraceTraps) {
-          tty->print_cr("trap: zombie_not_entrant");
+          tty->print_cr("trap: zombie_not_entrant (%s)", (sig == SIGTRAP) ? "SIGTRAP" : "SIGILL");
         }
         stub = SharedRuntime::get_handle_wrong_method_stub();
       } else if ((sig == SIGSEGV || sig == SIGBUS) && SafepointMechanism::is_poll_address((address)info->si_addr)) {
@@ -462,6 +481,50 @@ PRAGMA_DIAG_POP
       }
     }
   }
+
+#ifdef __APPLE__
+  // Execution protection violation
+  //
+  // This should be kept as the last step in the triage.  We don't
+  // have a dedicated trap number for a no-execute fault, so be
+  // conservative and allow other handlers the first shot.
+  if (UnguardOnExecutionViolation > 0 &&
+      (sig == SIGBUS)) {
+    static __thread address last_addr = (address) -1;
+
+    address addr = (address) info->si_addr;
+    address pc = os::Bsd::ucontext_get_pc(uc);
+
+    if (pc != addr && uc->context_esr == 0x9200004F) { //TODO: figure out what this value means
+      // We are faulting trying to write a R-X page
+      pthread_jit_write_protect_np(false);
+
+      log_debug(os)("Writing protection violation "
+                    "at " INTPTR_FORMAT
+                    ", unprotecting", p2i(addr));
+
+      stub = pc;
+
+      last_addr = (address) -1;
+    } else if (pc == addr && uc->context_esr == 0x8200000f) { //TODO: figure out what this value means
+      // We are faulting trying to execute a RW- page
+
+      if (addr != last_addr) {
+        pthread_jit_write_protect_np(true);
+
+        log_debug(os)("Execution protection violation "
+                      "at " INTPTR_FORMAT
+                      ", protecting", p2i(addr));
+
+        stub = pc;
+
+        // Set last_addr so if we fault again at the same address, we don't end
+        // up in an endless loop.
+        last_addr = addr;
+      }
+    }
+  }
+#endif
 
   if (stub != NULL) {
     // save all thread context in case we need to restore it
@@ -754,6 +817,10 @@ void os::verify_stack_alignment() {
 int os::extra_bang_size_in_bytes() {
   // AArch64 does not require the additional stack bang.
   return 0;
+}
+
+void os::current_thread_enable_wx_impl(WXMode mode) {
+  pthread_jit_write_protect_np(mode != WXWrite);
 }
 
 extern "C" {

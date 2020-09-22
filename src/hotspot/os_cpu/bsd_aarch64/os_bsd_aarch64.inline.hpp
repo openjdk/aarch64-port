@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 1999, 2020, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,22 +22,9 @@
  *
  */
 
-#ifndef OS_CPU_BSD_AARCH64_ICACHE_AARCH64_HPP
-#define OS_CPU_BSD_AARCH64_ICACHE_AARCH64_HPP
+#ifndef OS_CPU_BSD_AARCH64_OS_BSD_AARCH64_INLINE_HPP
+#define OS_CPU_BSD_AARCH64_OS_BSD_AARCH64_INLINE_HPP
 
-// Interface for updating the instruction cache.  Whenever the VM
-// modifies code, part of the processor instruction cache potentially
-// has to be flushed.
+#include "runtime/os.hpp"
 
-class ICache : public AbstractICache {
- public:
-  static void initialize();
-  static void invalidate_word(address addr) {
-    __clear_cache((char *)addr, (char *)(addr + 4));
-  }
-  static void invalidate_range(address start, int nbytes) {
-    __clear_cache((char *)start, (char *)(start + nbytes));
-  }
-};
-
-#endif // OS_CPU_BSD_AARCH64_ICACHE_AARCH64_HPP
+#endif // OS_CPU_BSD_AARCH64_OS_BSD_AARCH64_INLINE_HPP

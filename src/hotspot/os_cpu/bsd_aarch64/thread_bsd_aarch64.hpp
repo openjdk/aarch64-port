@@ -27,6 +27,16 @@
 #define OS_CPU_BSD_AARCH64_THREAD_BSD_AARCH64_HPP
 
  private:
+#ifdef ASSERT
+  // spill stack holds N callee-save registers at each Java call and
+  // grows downwards towards limit
+  // we need limit to check we have space for a spill and base so we
+  // can identify all live spill frames at GC (eventually)
+  address          _spill_stack;
+  address          _spill_stack_base;
+  address          _spill_stack_limit;
+#endif // ASSERT
+
   void pd_initialize() {
     _anchor.clear();
   }
@@ -51,6 +61,7 @@
     bool isInJava);
 
   bool pd_get_top_frame_for_profiling(frame* fr_addr, void* ucontext, bool isInJava);
+
 private:
   bool pd_get_top_frame(frame* fr_addr, void* ucontext, bool isInJava);
 public:

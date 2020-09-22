@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 1999, 2020, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2014, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2003, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,22 +22,25 @@
  *
  */
 
-#ifndef OS_CPU_BSD_AARCH64_ICACHE_AARCH64_HPP
-#define OS_CPU_BSD_AARCH64_ICACHE_AARCH64_HPP
+package sun.jvm.hotspot.debugger.bsd.aarch64;
 
-// Interface for updating the instruction cache.  Whenever the VM
-// modifies code, part of the processor instruction cache potentially
-// has to be flushed.
+import sun.jvm.hotspot.debugger.*;
+import sun.jvm.hotspot.debugger.aarch64.*;
+import sun.jvm.hotspot.debugger.bsd.*;
 
-class ICache : public AbstractICache {
- public:
-  static void initialize();
-  static void invalidate_word(address addr) {
-    __clear_cache((char *)addr, (char *)(addr + 4));
+public class BsdAARCH64ThreadContext extends AARCH64ThreadContext {
+  private BsdDebugger debugger;
+
+  public BsdAARCH64ThreadContext(BsdDebugger debugger) {
+    super();
+    this.debugger = debugger;
   }
-  static void invalidate_range(address start, int nbytes) {
-    __clear_cache((char *)start, (char *)(start + nbytes));
-  }
-};
 
-#endif // OS_CPU_BSD_AARCH64_ICACHE_AARCH64_HPP
+  public void setRegisterAsAddress(int index, Address value) {
+    setRegister(index, debugger.getAddressValue(value));
+  }
+
+  public Address getRegisterAsAddress(int index) {
+    return debugger.newAddress(getRegister(index));
+  }
+}
