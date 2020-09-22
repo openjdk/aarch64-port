@@ -34,7 +34,7 @@
 // returns 107 for Lion, 106 for SnowLeopard etc.
 int getOSXMajorVersion() {
 
-#ifdef __arm64__
+#if MAC_OS_X_VERSION_MIN_REQUIRED >= __MAC_10_10
 
     NSOperatingSystemVersion osInfo = [NSProcessInfo processInfo].operatingSystemVersion;
 
