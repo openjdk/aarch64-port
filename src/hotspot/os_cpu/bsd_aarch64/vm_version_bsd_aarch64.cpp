@@ -39,7 +39,7 @@ int VM_Version::set_and_get_current_sve_vector_lenght(int length) {
 
 void VM_Version::get_os_cpu_info() {
   _icache_line_size = _dcache_line_size = 64;
-  
+
   // Disable DC ZVA
   _zva_length = -1;
 }
