@@ -32,15 +32,15 @@
 #include "libproc_impl.h"
 #include "ps_core_common.h"
 
-#define UNSUPPORTED_ARCH "Unsupported architecture!"
-
-#if defined(__x86_64__)
+#ifdef __APPLE__
+#if defined(amd64)
 #include "sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext.h"
-#elif defined(__arm64__)
+#elif defined(aarch64)
 #include "sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext.h"
 #else
 #error UNSUPPORTED_ARCH
 #endif
+#endif /* __APPLE__ */
 
 // This file has the libproc implementation to read core files.
 // For live processes, refer to ps_proc.c. Portions of this is adapted
@@ -201,7 +201,8 @@ static ps_prochandle_ops core_ops = {
 void print_thread(sa_thread_info *threadinfo) {
   print_debug("thread added: %d\n", threadinfo->lwp_id);
   print_debug("registers:\n");
-#if defined(__x86_64__)
+
+#if defined(amd64)
   print_debug("  r_r15: 0x%" PRIx64 "\n", threadinfo->regs.r_r15);
   print_debug("  r_r14: 0x%" PRIx64 "\n", threadinfo->regs.r_r14);
   print_debug("  r_r13: 0x%" PRIx64 "\n", threadinfo->regs.r_r13);
@@ -223,7 +224,8 @@ void print_thread(sa_thread_info *threadinfo) {
   print_debug("  r_cs:  0x%" PRIx64 "\n", threadinfo->regs.r_cs);
   print_debug("  r_rsp: 0x%" PRIx64 "\n", threadinfo->regs.r_rsp);
   print_debug("  r_rflags: 0x%" PRIx64 "\n", threadinfo->regs.r_rflags);
-#elif defined(__arm64__)
+
+#elif defined(aarch64)
   print_debug(" r_r0:  0x%" PRIx64 "\n", threadinfo->regs.r_r0);
   print_debug(" r_r1:  0x%" PRIx64 "\n", threadinfo->regs.r_r1);
   print_debug(" r_r2:  0x%" PRIx64 "\n", threadinfo->regs.r_r2);
@@ -257,7 +259,9 @@ void print_thread(sa_thread_info *threadinfo) {
   print_debug(" r_lr:  0x%" PRIx64 "\n", threadinfo->regs.r_lr);
   print_debug(" r_sp:  0x%" PRIx64 "\n", threadinfo->regs.r_sp);
   print_debug(" r_pc:  0x%" PRIx64 "\n", threadinfo->regs.r_pc);
-  print_debug(" r_pstate: 0x%" PRIx32 "\n", threadinfo->regs.r_pstate);
+
+#else
+#error UNSUPPORTED_ARCH
 #endif
 }
 
@@ -312,7 +316,7 @@ static bool read_core_segments(struct ps_prochandle* ph) {
           goto err;
         }
         size += sizeof(thread_fc);
-#if defined(__x86_64__)
+#if defined(amd64)
         if (fc.flavor == x86_THREAD_STATE) {
           x86_thread_state_t thrstate;
           if (read(fd, (void *)&thrstate, sizeof(x86_thread_state_t)) != sizeof(x86_thread_state_t)) {
@@ -372,7 +376,8 @@ static bool read_core_segments(struct ps_prochandle* ph) {
           }
           size += sizeof(x86_exception_state_t);
         }
-#elif defined(__arm64__)
+
+#elif defined(aarch64)
         if (fc.flavor == ARM_THREAD_STATE64) {
           arm_thread_state64_t thrstate;
           if (read(fd, (void *)&thrstate, sizeof(arm_thread_state64_t)) != sizeof(arm_thread_state64_t)) {
@@ -428,15 +433,14 @@ static bool read_core_segments(struct ps_prochandle* ph) {
           newthr->regs.r_lr  = get_register_v(thrstate, lr);
           newthr->regs.r_sp  = get_register_v(thrstate, sp);
           newthr->regs.r_pc  = get_register_v(thrstate, pc);
-          newthr->regs.r_pstate = get_register_v(thrstate, cpsr);
           print_thread(newthr);
-        } else if (fc.flavor == ARM_VFP_STATE) {
-          arm_vfp_state_t flstate;
-          if (read(fd, (void *)&flstate, sizeof(arm_vfp_state_t)) != sizeof(arm_vfp_state_t)) {
-            print_debug("Reading flavor, count failed.\n");
+        } else if (fc.flavor == ARM_NEON_STATE64) {
+          arm_neon_state64_t flstate;
+          if (read(fd, (void *)&flstate, sizeof(arm_neon_state64_t)) != sizeof(arm_neon_state64_t)) {
+            printf("Reading flavor, count failed.\n");
             goto err;
           }
-          size += sizeof(arm_vfp_state_t);
+          size += sizeof(arm_neon_state64_t);
         } else if (fc.flavor == ARM_EXCEPTION_STATE64) {
           arm_exception_state64_t excpstate;
           if (read(fd, (void *)&excpstate, sizeof(arm_exception_state64_t)) != sizeof(arm_exception_state64_t)) {
@@ -444,7 +448,17 @@ static bool read_core_segments(struct ps_prochandle* ph) {
             goto err;
           }
           size += sizeof(arm_exception_state64_t);
+        } else if (fc.flavor == ARM_DEBUG_STATE64) {
+          arm_debug_state64_t dbgstate;
+          if (read(fd, (void *)&dbgstate, sizeof(arm_debug_state64_t)) != sizeof(arm_debug_state64_t)) {
+            printf("Reading flavor, count failed.\n");
+            goto err;
+          }
+          size += sizeof(arm_debug_state64_t);
         }
+
+#else
+#error UNSUPPORTED_ARCH
 #endif
       }
     }
@@ -831,43 +845,6 @@ static bool core_handle_prstatus(struct ps_prochandle* ph, const char* buf, size
       //print_debug("\tes = 0x%lx\n", newthr->regs.es);
       //print_debug("\tfs = 0x%lx\n", newthr->regs.fs);
       //print_debug("\tgs = 0x%lx\n", newthr->regs.gs);
-#endif
-
-#if defined(__arm64__)
-      print_debug("\tr_r0 = 0x%lx\n", newthr->regs.r_r0);
-      print_debug("\tr_r1 = 0x%lx\n", newthr->regs.r_r1);
-      print_debug("\tr_r2 = 0x%lx\n", newthr->regs.r_r2);
-      print_debug("\tr_r3 = 0x%lx\n", newthr->regs.r_r3);
-      print_debug("\tr_r4 = 0x%lx\n", newthr->regs.r_r4);
-      print_debug("\tr_r5 = 0x%lx\n", newthr->regs.r_r5);
-      print_debug("\tr_r6 = 0x%lx\n", newthr->regs.r_r6);
-      print_debug("\tr_r7 = 0x%lx\n", newthr->regs.r_r7);
-      print_debug("\tr_r8 = 0x%lx\n", newthr->regs.r_r8);
-      print_debug("\tr_r9 = 0x%lx\n", newthr->regs.r_r9);
-      print_debug("\tr_r10 = 0x%lx\n", newthr->regs.r_r10);
-      print_debug("\tr_r11 = 0x%lx\n", newthr->regs.r_r11);
-      print_debug("\tr_r12 = 0x%lx\n", newthr->regs.r_r12);
-      print_debug("\tr_r13 = 0x%lx\n", newthr->regs.r_r13);
-      print_debug("\tr_r14 = 0x%lx\n", newthr->regs.r_r14);
-      print_debug("\tr_r15 = 0x%lx\n", newthr->regs.r_r15);
-      print_debug("\tr_r16 = 0x%lx\n", newthr->regs.r_r16);
-      print_debug("\tr_r17 = 0x%lx\n", newthr->regs.r_r17);
-      print_debug("\tr_r18 = 0x%lx\n", newthr->regs.r_r18);
-      print_debug("\tr_r19 = 0x%lx\n", newthr->regs.r_r19);
-      print_debug("\tr_r20 = 0x%lx\n", newthr->regs.r_r20);
-      print_debug("\tr_r21 = 0x%lx\n", newthr->regs.r_r21);
-      print_debug("\tr_r22 = 0x%lx\n", newthr->regs.r_r22);
-      print_debug("\tr_r23 = 0x%lx\n", newthr->regs.r_r23);
-      print_debug("\tr_r24 = 0x%lx\n", newthr->regs.r_r24);
-      print_debug("\tr_r25 = 0x%lx\n", newthr->regs.r_r25);
-      print_debug("\tr_r26 = 0x%lx\n", newthr->regs.r_r26);
-      print_debug("\tr_r27 = 0x%lx\n", newthr->regs.r_r27);
-      print_debug("\tr_r28 = 0x%lx\n", newthr->regs.r_r28);
-      print_debug("\tr_fp = 0x%lx\n", newthr->regs.r_fp);
-      print_debug("\tr_lr = 0x%lx\n", newthr->regs.r_lr);
-      print_debug("\tr_sp = 0x%lx\n", newthr->regs.r_sp);
-      print_debug("\tr_pc = 0x%lx\n", newthr->regs.r_pc);
-      print_debug("\tr_pstate = 0x%x\n", newthr->regs.r_pstate);
 #endif
    }
 

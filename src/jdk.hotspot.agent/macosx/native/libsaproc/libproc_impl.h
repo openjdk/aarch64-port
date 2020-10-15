@@ -30,6 +30,16 @@
 #include "libproc.h"
 #include "symtab.h"
 
+#define UNSUPPORTED_ARCH "Unsupported architecture!"
+
+#if defined(__x86_64__) && !defined(amd64)
+#define amd64 1
+#endif
+
+#if defined(__arm64__) && !defined(aarch64)
+#define aarch64 1
+#endif
+
 #ifdef __APPLE__
 #include <inttypes.h>     // for PRIx64, 32, ...
 #include <pthread.h>
@@ -42,7 +52,7 @@
 #define register_t uint64_t
 #endif
 
-#if defined(__x86_64__)
+#if defined(amd64)
 /*** registers copied from bsd/amd64 */
 typedef struct reg {
   register_t      r_r15;
@@ -72,7 +82,8 @@ typedef struct reg {
   register_t      r_rsp;
   register_t      r_ss;          // not used
 } reg;
-#elif defined(__arm64__)
+
+#elif defined(aarch64)
 /*** registers copied from bsd/arm64 */
 typedef struct reg {
    register_t     r_r0;
@@ -108,8 +119,10 @@ typedef struct reg {
    register_t     r_lr;
    register_t     r_sp;
    register_t     r_pc;
-   uint32_t       r_pstate;
 } reg;
+
+#else
+#error UNSUPPORTED_ARCH
 #endif
 
 // convenient defs

@@ -391,7 +391,7 @@ JVM_handle_bsd_signal(int sig,
       Thread::WXWriteFromExecSetter wx_write;
 
       // Handle signal from NativeJump::patch_verified_entry().
-      if ((sig == SIGILL || sig == SIGTRAP)
+      if ((sig == SIGILL)
           && nativeInstruction_at(pc)->is_sigill_zombie_not_entrant()) {
         if (TraceTraps) {
           tty->print_cr("trap: zombie_not_entrant (%s)", (sig == SIGTRAP) ? "SIGTRAP" : "SIGILL");
@@ -820,7 +820,7 @@ int os::extra_bang_size_in_bytes() {
 }
 
 void os::current_thread_enable_wx_impl(WXMode mode) {
-  pthread_jit_write_protect_np(mode != WXWrite);
+  pthread_jit_write_protect_np(mode == WXExec);
 }
 
 extern "C" {
