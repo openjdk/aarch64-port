@@ -482,7 +482,7 @@ PRAGMA_DIAG_POP
     }
   }
 
-#ifdef __APPLE__
+#if defined(ASSERT) && defined(__APPLE__)
   // Execution protection violation
   //
   // This should be kept as the last step in the triage.  We don't
