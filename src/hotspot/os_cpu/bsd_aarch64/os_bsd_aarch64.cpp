@@ -358,24 +358,6 @@ JVM_handle_bsd_signal(int sig,
           // to handle_unexpected_exception way down below.
           overflow_state->disable_stack_red_zone();
           tty->print_raw_cr("An irrecoverable stack overflow has occurred.");
-        } else {
-          // Accessing stack address below sp may cause SEGV if current
-          // thread has MAP_GROWSDOWN stack. This should only happen when
-          // current thread was created by user code with MAP_GROWSDOWN flag
-          // and then attached to VM. See notes in os_linux.cpp.
-          if (thread->osthread()->expanding_stack() == 0) {
-             assert(false, "not sure");
-#if 0
-             thread->osthread()->set_expanding_stack();
-             if (os::Bsd::manually_expand_stack(thread, addr)) {
-               thread->osthread()->clear_expanding_stack();
-               return 1;
-             }
-             thread->osthread()->clear_expanding_stack();
-#endif
-          } else {
-             fatal("recursive segv. expanding stack.");
-          }
         }
       }
     }
