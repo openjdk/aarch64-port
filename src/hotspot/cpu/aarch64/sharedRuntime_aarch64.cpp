@@ -56,6 +56,42 @@
 
 #define __ masm->
 
+// ABI Handling Macros
+// Used to control platform-dependent stack argument padding and size.
+
+#define stack_offset(bytes_used) ((bytes_used / 8) * 2)
+
+// helper to keep the offset as an invalid position in the second register of the pair.
+#ifdef __APPLE__
+#  define offset_to_register(bytes_used) (uintptr_t) VMRegImpl::Bad - (bytes_used % 8)
+#  define register_to_offset(position) -(((intptr_t)position) - (intptr_t)VMRegImpl::Bad)
+#else
+#  define offset_to_register(bytes_used) (uintptr_t) VMRegImpl::Bad
+#  define register_to_offset(bytes_used) 0
+#endif
+
+// handles padding and offset based on size when required
+#ifdef __APPLE__
+#  define handle_padding(bytes_used, size) {\
+    if (bytes_used % size > 0) {\
+      bytes_used += size - (bytes_used % size);\
+    }\
+  }
+#  define advance_offset(bytes_used, size) { bytes_used += size; }
+#else
+#  define handle_padding(bytes_used, size)
+#  define advance_offset(bytes_used, size) { bytes_used += 8; }
+#endif
+
+// abi-dependant move for required types
+#ifdef __APPLE__
+#  define abi_dep_word_move(masm, src, dst, size) move_merge_and_shift(masm, src, dst, size);
+#  define abi_dep_float_move(masm, src, dst, size) move_merge_and_shift(masm, src, dst, size);
+#else
+#  define abi_dep_word_move(masm, src, dst, size) move32_64(masm, src, dst);
+#  define abi_dep_float_move(masm, src, dst, size) float_move(masm, src, dst);
+#endif
+
 const int StackAlignmentInSlots = StackAlignmentInBytes / VMRegImpl::stack_slot_size;
 
 class SimpleRuntimeFrame {
@@ -770,6 +806,10 @@ AdapterHandlerEntry* SharedRuntime::generate_i2c2i_adapters(MacroAssembler *masm
   return AdapterHandlerLibrary::new_entry(fingerprint, i2c_entry, c2i_entry, c2i_unverified_entry, c2i_no_clinit_check_entry);
 }
 
+// On type size dependant ABIs types smaller than 8 bytes will use the second word
+// to store the position relative to the doubleword where the value needs to be
+// written. This allows padding to be pre-calculated. As a result of this it is
+// to be expected that some contiguous arguments share the same stack offset.
 int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
                                          VMRegPair *regs,
                                          VMRegPair *regs2,
@@ -789,25 +829,37 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
 
     uint int_args = 0;
     uint fp_args = 0;
-    uint stk_args = 0; // inc by 2 each time
+    int bytes_used = 0;
 
     for (int i = 0; i < total_args_passed; i++) {
       switch (sig_bt[i]) {
       case T_BOOLEAN:
-      case T_CHAR:
       case T_BYTE:
+        if (int_args < Argument::n_int_register_parameters_c) {
+          regs[i].set1(INT_ArgReg[int_args++]->as_VMReg());
+        } else {
+          handle_padding(bytes_used, 1);
+          regs[i].set_pair((VMReg) offset_to_register(bytes_used), VMRegImpl::stack2reg(stack_offset(bytes_used)));
+          advance_offset(bytes_used, 1);
+        }
+        break;
+      case T_CHAR:
       case T_SHORT:
+        if (int_args < Argument::n_int_register_parameters_c) {
+          regs[i].set1(INT_ArgReg[int_args++]->as_VMReg());
+        } else {
+          handle_padding(bytes_used, 2);
+          regs[i].set_pair((VMReg) offset_to_register(bytes_used), VMRegImpl::stack2reg(stack_offset(bytes_used)));
+          advance_offset(bytes_used, 2);
+        }
+        break;
       case T_INT:
         if (int_args < Argument::n_int_register_parameters_c) {
           regs[i].set1(INT_ArgReg[int_args++]->as_VMReg());
         } else {
-#ifdef __APPLE__
-          // Less-than word types are stored one after another.
-          // The code unable to handle this, bailout.
-          return -1;
-#endif
-          regs[i].set1(VMRegImpl::stack2reg(stk_args));
-          stk_args += 2;
+          handle_padding(bytes_used, 4);
+          regs[i].set_pair((VMReg) offset_to_register(bytes_used), VMRegImpl::stack2reg(stack_offset(bytes_used)));
+          advance_offset(bytes_used, 4);
         }
         break;
       case T_LONG:
@@ -820,21 +872,18 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
         if (int_args < Argument::n_int_register_parameters_c) {
           regs[i].set2(INT_ArgReg[int_args++]->as_VMReg());
         } else {
-          regs[i].set2(VMRegImpl::stack2reg(stk_args));
-          stk_args += 2;
+          handle_padding(bytes_used, 8);
+          regs[i].set2(VMRegImpl::stack2reg(stack_offset(bytes_used)));
+          advance_offset(bytes_used, 8);
         }
         break;
       case T_FLOAT:
         if (fp_args < Argument::n_float_register_parameters_c) {
           regs[i].set1(FP_ArgReg[fp_args++]->as_VMReg());
         } else {
-#ifdef __APPLE__
-          // Less-than word types are stored one after another.
-          // The code unable to handle this, bailout.
-          return -1;
-#endif
-          regs[i].set1(VMRegImpl::stack2reg(stk_args));
-          stk_args += 2;
+          handle_padding(bytes_used, 4);
+          regs[i].set_pair((VMReg) offset_to_register(bytes_used), VMRegImpl::stack2reg(stack_offset(bytes_used)));
+          advance_offset(bytes_used, 4);
         }
         break;
       case T_DOUBLE:
@@ -842,8 +891,9 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
         if (fp_args < Argument::n_float_register_parameters_c) {
           regs[i].set2(FP_ArgReg[fp_args++]->as_VMReg());
         } else {
-          regs[i].set2(VMRegImpl::stack2reg(stk_args));
-          stk_args += 2;
+          handle_padding(bytes_used, 8);
+          regs[i].set2(VMRegImpl::stack2reg(stack_offset(bytes_used)));
+          advance_offset(bytes_used, 8);
         }
         break;
       case T_VOID: // Halves of longs and doubles
@@ -856,7 +906,10 @@ int SharedRuntime::c_calling_convention(const BasicType *sig_bt,
       }
     }
 
-  return stk_args;
+  // Ensure padding when finished parsing arguments
+  bytes_used += bytes_used % 8;
+
+  return bytes_used / 4;
 }
 
 // On 64 bit we will store integer like items to the stack as
@@ -880,6 +933,56 @@ static void move32_64(MacroAssembler* masm, VMRegPair src, VMRegPair dst) {
     __ str(src.first()->as_Register(), Address(sp, reg2offset_out(dst.first())));
   } else {
     if (dst.first() != src.first()) {
+      __ sxtw(dst.first()->as_Register(), src.first()->as_Register());
+    }
+  }
+}
+
+// On type size dependant ABIs values a double word might share
+// multiple stacked arguments. This will take the input argument
+// size into account to load the current value, zero-out the
+// bits to be overwritten (maybe unnecessary?), pad the input
+// and merge the values.
+// Don't use with types that take the entire double-word.
+static void move_merge_and_shift(MacroAssembler* masm, VMRegPair src, VMRegPair dst, int bit_size) {
+  assert(bit_size <= 32, "can't handle more than 32 bits.");
+
+  if (dst.first()->is_stack()) {
+      // FIXME: using second VMReg as bit offset to precalculate padding
+      int bit_offset = register_to_offset(dst.second()) * 8;
+      assert(bit_size + bit_offset <= 64, "can't offset outside 64 bits.");
+
+      // load source data into rscratch1 indistintevely of where it's coming from
+      if (src.first()->is_stack()) {
+        __ ldr(rscratch1, Address(rfp, reg2offset_in(src.first())));
+      } else {
+        __ mov(rscratch1, src.first()->as_Register());
+      }
+
+      // ensure rscratch1 doesn't add data outside its scope, also shift it to its final position
+      __ andr(rscratch1, rscratch1, (1L << bit_size) - 1);
+      __ lsl(rscratch1, rscratch1, bit_offset);
+
+      // load destination register
+      __ ldr(rscratch2, Address(sp, reg2offset_out(dst.first())));
+
+      // clear bits to be overwritten by shift
+      if (bit_offset > 0) {
+        __ ror(rscratch2, rscratch2, bit_offset);
+      }
+      __ lsr(rscratch2, rscratch2, bit_size);
+      __ ror(rscratch2, rscratch2, 64 - bit_size - bit_offset);
+
+      // combine
+      __ orr(rscratch1, rscratch1, rscratch2);
+
+      // save
+      __ str(rscratch1, Address(sp, reg2offset_out(dst.first())));
+
+  } else {
+    if (src.first()->is_stack()) {
+      __ ldrsw(dst.first()->as_Register(), Address(rfp, reg2offset_in(src.first())));
+    } else  if (dst.first() != src.first()) {
       __ sxtw(dst.first()->as_Register(), src.first()->as_Register());
     }
   }
@@ -1686,7 +1789,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
         break;
 
       case T_FLOAT:
-        float_move(masm, in_regs[i], out_regs[c_arg]);
+        abi_dep_float_move(masm, in_regs[i], out_regs[c_arg], 32);
         float_args++;
         break;
 
@@ -1704,6 +1807,21 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
         break;
 
       case T_ADDRESS: assert(false, "found T_ADDRESS in java args");
+
+      case T_BOOLEAN:
+      case T_BYTE:
+        abi_dep_word_move(masm, in_regs[i], out_regs[c_arg], 8);
+        int_args++;
+        break;
+      case T_CHAR:
+      case T_SHORT:
+        abi_dep_word_move(masm, in_regs[i], out_regs[c_arg], 16);
+        int_args++;
+        break;
+      case T_INT:
+        abi_dep_word_move(masm, in_regs[i], out_regs[c_arg], 32);
+        int_args++;
+        break;
 
       default:
         move32_64(masm, in_regs[i], out_regs[c_arg]);
