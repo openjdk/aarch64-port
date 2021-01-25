@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,6 +27,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+// For Thread definition
+#include "runtime/thread.hpp"
+
 #define GTEST_DONT_DEFINE_TEST 1
 
 // googlemock has ::testing::internal::Log function, so we need to temporary
@@ -47,6 +50,10 @@
 #undef R
 #undef F1
 #undef F2
+
+// A work around for GCC math header bug leaving isfinite() undefined,
+// see: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=14608
+#include "utilities/globalDefinitions.hpp"
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -72,16 +79,46 @@
 
 #define TEST(category, name) GTEST_TEST(category, name)
 
-#define TEST_VM(category, name) GTEST_TEST(category, CONCAT(name, _vm))
+#define TEST_VM(category, name)                                     \
+  class category ## _  ## name ## _vm : public ::testing::Test {    \
+  public:                                                           \
+    static void do_test();                                          \
+  };                                                                \
+                                                                    \
+  GTEST_TEST(category, CONCAT(name, _vm)) {                         \
+    Thread::WXWriteFromExecSetter wx_write;                         \
+    category ## _ ## name ## _vm::do_test();                        \
+  }                                                                 \
+                                                                    \
+  void category ## _ ## name ## _vm::do_test()
 
 #define TEST_VM_F(test_fixture, name)                               \
-  GTEST_TEST_(test_fixture, name ## _vm, test_fixture,              \
-              ::testing::internal::GetTypeId<test_fixture>())
+  class test_fixture ## _  ## name ## _vm_f : public test_fixture { \
+  public:                                                           \
+    void SetUp() {                                                  \
+      Thread::WXWriteFromExecSetter wx_write;                       \
+      test_fixture::SetUp();                                        \
+    }                                                               \
+  protected:                                                        \
+    void do_test();                                                 \
+  };                                                                \
+                                                                    \
+  GTEST_TEST_(test_fixture ## _ ## name,                            \
+      name ## _vm,                                                  \
+      test_fixture ## _ ## name ## _vm_f,                           \
+      ::testing::internal::GetTypeId<                               \
+        test_fixture ## _ ## name ## _vm_f>()) {                    \
+    Thread::WXWriteFromExecSetter wx_write;                         \
+    do_test();                                                      \
+  }                                                                 \
+                                                                    \
+  void test_fixture ## _ ## name ## _vm_f::do_test()
 
 #define TEST_OTHER_VM(category, name)                               \
   static void test_  ## category ## _ ## name ## _();               \
                                                                     \
   static void child_ ## category ## _ ## name ## _() {              \
+    Thread::WXWriteFromExecSetter wx_write;                         \
     ::testing::GTEST_FLAG(throw_on_failure) = true;                 \
     test_ ## category ## _ ## name ## _();                          \
     fprintf(stderr, "OKIDOKI");                                     \
@@ -101,6 +138,7 @@
   static void test_  ## category ## _ ## name ## _();               \
                                                                     \
   static void child_ ## category ## _ ## name ## _() {              \
+    Thread::WXWriteFromExecSetter wx_write;                         \
     ::testing::GTEST_FLAG(throw_on_failure) = true;                 \
     test_ ## category ## _ ## name ## _();                          \
     exit(0);                                                        \
@@ -123,6 +161,7 @@
   static void test_  ## category ## _ ## name ## _();               \
                                                                     \
   static void child_ ## category ## _ ## name ## _() {              \
+    Thread::WXWriteFromExecSetter wx_write;                         \
     ::testing::GTEST_FLAG(throw_on_failure) = true;                 \
     test_ ## category ## _ ## name ## _();                          \
     exit(0);                                                        \
@@ -131,7 +170,7 @@
   TEST(category, CONCAT(name, _vm_assert)) {                        \
     ASSERT_EXIT(child_ ## category ## _ ## name ## _(),             \
                 ::testing::ExitedWithCode(1),                       \
-                "^assert failed: " msg);                            \
+                "assert failed: " msg);                             \
   }                                                                 \
                                                                     \
   void test_ ## category ## _ ## name ## _()

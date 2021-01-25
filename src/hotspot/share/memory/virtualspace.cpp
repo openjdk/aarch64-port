@@ -81,27 +81,27 @@ ReservedSpace::ReservedSpace(char* base, size_t size, size_t alignment,
 }
 
 // Helper method
-static char* attempt_map_or_reserve_memory_at(char* base, size_t size, int fd) {
+static char* attempt_map_or_reserve_memory_at(char* base, size_t size, int fd, bool executable) {
   if (fd != -1) {
     return os::attempt_map_memory_to_file_at(base, size, fd);
   }
-  return os::attempt_reserve_memory_at(base, size);
+  return os::attempt_reserve_memory_at(base, size, executable);
 }
 
 // Helper method
-static char* map_or_reserve_memory(size_t size, int fd) {
+static char* map_or_reserve_memory(size_t size, int fd, bool executable) {
   if (fd != -1) {
     return os::map_memory_to_file(size, fd);
   }
-  return os::reserve_memory(size);
+  return os::reserve_memory(size, executable);
 }
 
 // Helper method
-static char* map_or_reserve_memory_aligned(size_t size, size_t alignment, int fd) {
+static char* map_or_reserve_memory_aligned(size_t size, size_t alignment, int fd, bool executable) {
   if (fd != -1) {
     return os::map_memory_to_file_aligned(size, alignment, fd);
   }
-  return os::reserve_memory_aligned(size, alignment);
+  return os::reserve_memory_aligned(size, alignment, executable);
 }
 
 // Helper method
@@ -212,17 +212,13 @@ void ReservedSpace::initialize(size_t size, size_t alignment, bool large,
     // important.  If available space is not detected, return NULL.
 
     if (requested_address != 0) {
-      base = attempt_map_or_reserve_memory_at(requested_address, size, _fd_for_heap);
+      base = attempt_map_or_reserve_memory_at(requested_address, size, _fd_for_heap, _executable);
       if (failed_to_reserve_as_requested(base, requested_address, size, false, _fd_for_heap != -1)) {
         // OS ignored requested address. Try different address.
         base = NULL;
       }
     } else {
-      if (_executable) {
-        base = os::reserve_memory(size, ExecMem);
-      } else {
-        base = map_or_reserve_memory(size, _fd_for_heap);
-      }
+      base = map_or_reserve_memory(size, _fd_for_heap, _executable);
     }
 
     if (base == NULL) return;
@@ -234,7 +230,7 @@ void ReservedSpace::initialize(size_t size, size_t alignment, bool large,
 
       // Make sure that size is aligned
       size = align_up(size, alignment);
-      base = map_or_reserve_memory_aligned(size, alignment, _fd_for_heap);
+      base = map_or_reserve_memory_aligned(size, alignment, _fd_for_heap, _executable);
 
       if (requested_address != 0 &&
           failed_to_reserve_as_requested(base, requested_address, size, false, _fd_for_heap != -1)) {
@@ -256,13 +252,9 @@ void ReservedSpace::initialize(size_t size, size_t alignment, bool large,
   }
 }
 
-ReservedSpace ReservedSpace::first_part(size_t partition_size, size_t alignment, bool split) {
+ReservedSpace ReservedSpace::first_part(size_t partition_size, size_t alignment) {
   assert(partition_size <= size(), "partition failed");
-  if (split && partition_size > 0 && partition_size < size()) {
-    os::split_reserved_memory(base(), size(), partition_size);
-  }
-  ReservedSpace result(base(), partition_size, alignment, special(),
-                       executable());
+  ReservedSpace result(base(), partition_size, alignment, special(), executable());
   return result;
 }
 
@@ -290,6 +282,24 @@ size_t ReservedSpace::allocation_align_size_up(size_t size) {
   return align_up(size, os::vm_allocation_granularity());
 }
 
+size_t ReservedSpace::actual_reserved_page_size(const ReservedSpace& rs) {
+  size_t page_size = os::vm_page_size();
+  if (UseLargePages) {
+    // There are two ways to manage large page memory.
+    // 1. OS supports committing large page memory.
+    // 2. OS doesn't support committing large page memory so ReservedSpace manages it.
+    //    And ReservedSpace calls it 'special'. If we failed to set 'special',
+    //    we reserved memory without large page.
+    if (os::can_commit_large_page_memory() || rs.special()) {
+      // An alignment at ReservedSpace comes from preferred page size or
+      // heap alignment, and if the alignment came from heap alignment, it could be
+      // larger than large pages size. So need to cap with the large page size.
+      page_size = MIN2(rs.alignment(), os::large_page_size());
+    }
+  }
+
+  return page_size;
+}
 
 void ReservedSpace::release() {
   if (is_reserved()) {
@@ -400,13 +410,13 @@ void ReservedHeapSpace::try_reserve_heap(size_t size,
     }
 
     if (requested_address != 0) {
-      base = attempt_map_or_reserve_memory_at(requested_address, size, _fd_for_heap);
+      base = attempt_map_or_reserve_memory_at(requested_address, size, _fd_for_heap, executable());
     } else {
       // Optimistically assume that the OSes returns an aligned base pointer.
       // When reserving a large address range, most OSes seem to align to at
       // least 64K.
       // If the returned memory is not aligned we will release and retry.
-      base = map_or_reserve_memory(size, _fd_for_heap);
+      base = map_or_reserve_memory(size, _fd_for_heap, executable());
     }
   }
   if (base == NULL) { return; }

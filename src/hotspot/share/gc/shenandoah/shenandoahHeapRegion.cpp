@@ -23,13 +23,14 @@
  */
 
 #include "precompiled.hpp"
-#include "memory/allocation.hpp"
+#include "gc/shared/space.inline.hpp"
+#include "gc/shared/tlab_globals.hpp"
 #include "gc/shenandoah/shenandoahHeapRegionSet.inline.hpp"
 #include "gc/shenandoah/shenandoahHeap.inline.hpp"
 #include "gc/shenandoah/shenandoahHeapRegion.hpp"
 #include "gc/shenandoah/shenandoahMarkingContext.inline.hpp"
-#include "gc/shared/space.inline.hpp"
 #include "jfr/jfrEvents.hpp"
+#include "memory/allocation.hpp"
 #include "memory/iterator.inline.hpp"
 #include "memory/resourceArea.hpp"
 #include "memory/universe.hpp"
@@ -40,6 +41,7 @@
 #include "runtime/mutexLocker.hpp"
 #include "runtime/os.hpp"
 #include "runtime/safepoint.hpp"
+#include "utilities/powerOfTwo.hpp"
 
 size_t ShenandoahHeapRegion::RegionCount = 0;
 size_t ShenandoahHeapRegion::RegionSizeBytes = 0;
@@ -548,7 +550,7 @@ void ShenandoahHeapRegion::setup_sizes(size_t max_heap_size) {
     region_size = MAX2(region_size, os::large_page_size());
   }
 
-  int region_size_log = log2_long((jlong) region_size);
+  int region_size_log = log2i(region_size);
   // Recalculate the region size to make sure it's a power of
   // 2. This means that region_size is the largest power of 2 that's
   // <= what we've calculated so far.
@@ -628,7 +630,7 @@ void ShenandoahHeapRegion::do_commit() {
 
 void ShenandoahHeapRegion::do_uncommit() {
   ShenandoahHeap* heap = ShenandoahHeap::heap();
-  if (!heap->is_heap_region_special() && !os::uncommit_memory((char *) bottom(), RegionSizeBytes, !ExecMem)) {
+  if (!heap->is_heap_region_special() && !os::uncommit_memory((char *) bottom(), RegionSizeBytes)) {
     report_java_out_of_memory("Unable to uncommit region");
   }
   if (!heap->uncommit_bitmap_slice(this)) {
