@@ -44,6 +44,12 @@
 #import <sys/ptrace.h>
 #include "libproc_impl.h"
 
+#define UNSUPPORTED_ARCH "Unsupported architecture!"
+
+#if defined(x86_64) && !defined(amd64)
+#define amd64 1
+#endif
+
 #if defined(amd64)
 #include "sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext.h"
 #elif defined(aarch64)
@@ -503,10 +509,13 @@ jlongArray getThreadIntegerRegisterSetFromCore(JNIEnv *env, jobject this_obj, lo
   }
 
 #undef NPRGREG
+#undef REG_INDEX
 #if defined(amd64)
 #define NPRGREG sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext_NPRGREG
+#define REG_INDEX(reg) sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext_##reg
 #elif defined(aarch64)
 #define NPRGREG sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext_NPRGREG
+#define REG_INDEX(reg) sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext_##reg
 #else
 #error UNSUPPORTED_ARCH
 #endif
@@ -515,10 +524,7 @@ jlongArray getThreadIntegerRegisterSetFromCore(JNIEnv *env, jobject this_obj, lo
   CHECK_EXCEPTION_(0);
   regs = (*env)->GetLongArrayElements(env, array, &isCopy);
 
-#undef REG_INDEX
-
 #if defined(amd64)
-#define REG_INDEX(reg) sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext_##reg
 
   regs[REG_INDEX(R15)] = gregs.r_r15;
   regs[REG_INDEX(R14)] = gregs.r_r14;
@@ -549,7 +555,6 @@ jlongArray getThreadIntegerRegisterSetFromCore(JNIEnv *env, jobject this_obj, lo
   regs[REG_INDEX(RFL)]    = gregs.r_rflags;
 
 #elif defined(aarch64)
-#define REG_INDEX(reg) sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext_##reg
 
   regs[REG_INDEX(R0)] = gregs.r_r0;
   regs[REG_INDEX(R1)] = gregs.r_r1;
@@ -699,10 +704,7 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_getThreadIntegerRegisterSet0(
   CHECK_EXCEPTION_(0);
   primitiveArray = (*env)->GetLongArrayElements(env, registerArray, NULL);
 
-#undef REG_INDEX
-
 #if defined(amd64)
-#define REG_INDEX(reg) sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext_##reg
 
   primitiveArray[REG_INDEX(R15)] = state.__r15;
   primitiveArray[REG_INDEX(R14)] = state.__r14;
@@ -734,7 +736,6 @@ Java_sun_jvm_hotspot_debugger_bsd_BsdDebuggerLocal_getThreadIntegerRegisterSet0(
   primitiveArray[REG_INDEX(GSBASE)] = 0;
 
 #elif defined(aarch64)
-#define REG_INDEX(reg) sun_jvm_hotspot_debugger_aarch64_AARCH64ThreadContext_##reg
 
   primitiveArray[REG_INDEX(R0)] = state.__x[0];
   primitiveArray[REG_INDEX(R1)] = state.__x[1];
