@@ -44,12 +44,6 @@
 #import <sys/ptrace.h>
 #include "libproc_impl.h"
 
-#define UNSUPPORTED_ARCH "Unsupported architecture!"
-
-#if defined(x86_64) && !defined(amd64)
-#define amd64 1
-#endif
-
 #if defined(amd64)
 #include "sun_jvm_hotspot_debugger_amd64_AMD64ThreadContext.h"
 #elif defined(aarch64)
