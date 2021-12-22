@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2002, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, Azul Systems, Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,24 +23,27 @@
  *
  */
 
-package sun.jvm.hotspot.debugger.bsd;
+#ifndef SHARE_RUNTIME_THREADWXSETTERS_INLINE_HPP
+#define SHARE_RUNTIME_THREADWXSETTERS_INLINE_HPP
 
-import sun.jvm.hotspot.debugger.*;
-import sun.jvm.hotspot.debugger.bsd.aarch64.*;
-import sun.jvm.hotspot.debugger.bsd.amd64.*;
-import sun.jvm.hotspot.debugger.bsd.x86.*;
+#include "runtime/thread.inline.hpp"
 
-class BsdThreadContextFactory {
-   static ThreadContext createThreadContext(BsdDebugger dbg) {
-      String cpu = dbg.getCPU();
-      if (cpu.equals("x86")) {
-         return new BsdX86ThreadContext(dbg);
-      } else if (cpu.equals("amd64") || cpu.equals("x86_64")) {
-         return new BsdAMD64ThreadContext(dbg);
-      } else if (cpu.equals("aarch64")) {
-         return new BsdAARCH64ThreadContext(dbg);
-      } else {
-         throw new RuntimeException("cpu " + cpu + " is not yet supported");
-      }
-   }
-}
+#if defined(__APPLE__) && defined(AARCH64)
+class ThreadWXEnable  {
+  Thread* _thread;
+  WXMode _old_mode;
+public:
+  ThreadWXEnable(WXMode new_mode, Thread* thread) :
+    _thread(thread),
+    _old_mode(_thread ? _thread->enable_wx(new_mode) : WXWrite)
+  { }
+  ~ThreadWXEnable() {
+    if (_thread) {
+      _thread->enable_wx(_old_mode);
+    }
+  }
+};
+#endif // __APPLE__ && AARCH64
+
+#endif // SHARE_RUNTIME_THREADWXSETTERS_INLINE_HPP
+

@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2006, 2019, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2014, 2019, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2021, Azul Systems, Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,94 +25,65 @@
  */
 
 #include "precompiled.hpp"
+#include "runtime/java.hpp"
 #include "runtime/os.hpp"
 #include "runtime/vm_version.hpp"
+#include <sys/sysctl.h>
 
-#include <asm/hwcap.h>
-#include <sys/auxv.h>
-#include <sys/prctl.h>
-
-#ifndef HWCAP_AES
-#define HWCAP_AES   (1<<3)
-#endif
-
-#ifndef HWCAP_PMULL
-#define HWCAP_PMULL (1<<4)
-#endif
-
-#ifndef HWCAP_SHA1
-#define HWCAP_SHA1  (1<<5)
-#endif
-
-#ifndef HWCAP_SHA2
-#define HWCAP_SHA2  (1<<6)
-#endif
-
-#ifndef HWCAP_CRC32
-#define HWCAP_CRC32 (1<<7)
-#endif
-
-#ifndef HWCAP_ATOMICS
-#define HWCAP_ATOMICS (1<<8)
-#endif
+static bool cpu_has(const char* optional) {
+  uint32_t val;
+  size_t len = sizeof(val);
+  if (sysctlbyname(optional, &val, &len, NULL, 0)) {
+    return false;
+  }
+  return val;
+}
 
 void VM_Version::get_os_cpu_info() {
+  size_t sysctllen;
 
-  uint64_t auxv = getauxval(AT_HWCAP);
+  // hw.optional.floatingpoint always returns 1, see
+  // https://github.com/apple/darwin-xnu/blob/master/bsd/kern/kern_mib.c#L416.
+  // ID_AA64PFR0_EL1 describes AdvSIMD always equals to FP field.
+  assert(cpu_has("hw.optional.floatingpoint"), "should be");
+  assert(cpu_has("hw.optional.neon"), "should be");
+  _features = CPU_FP | CPU_ASIMD;
 
-  STATIC_ASSERT(CPU_FP      == HWCAP_FP);
-  STATIC_ASSERT(CPU_ASIMD   == HWCAP_ASIMD);
-  STATIC_ASSERT(CPU_EVTSTRM == HWCAP_EVTSTRM);
-  STATIC_ASSERT(CPU_AES     == HWCAP_AES);
-  STATIC_ASSERT(CPU_PMULL   == HWCAP_PMULL);
-  STATIC_ASSERT(CPU_SHA1    == HWCAP_SHA1);
-  STATIC_ASSERT(CPU_SHA2    == HWCAP_SHA2);
-  STATIC_ASSERT(CPU_CRC32   == HWCAP_CRC32);
-  STATIC_ASSERT(CPU_LSE     == HWCAP_ATOMICS);
-  _features = auxv & (
-      HWCAP_FP      |
-      HWCAP_ASIMD   |
-      HWCAP_EVTSTRM |
-      HWCAP_AES     |
-      HWCAP_PMULL   |
-      HWCAP_SHA1    |
-      HWCAP_SHA2    |
-      HWCAP_CRC32   |
-      HWCAP_ATOMICS);
+  // Only few features are available via sysctl, see line 614
+  // https://opensource.apple.com/source/xnu/xnu-6153.141.1/bsd/kern/kern_mib.c.auto.html
+  if (cpu_has("hw.optional.armv8_crc32"))     _features |= CPU_CRC32;
+  if (cpu_has("hw.optional.armv8_1_atomics")) _features |= CPU_LSE;
 
-  uint64_t ctr_el0;
+  int cache_line_size;
+  int hw_conf_cache_line[] = { CTL_HW, HW_CACHELINE };
+  sysctllen = sizeof(cache_line_size);
+  if (sysctl(hw_conf_cache_line, 2, &cache_line_size, &sysctllen, NULL, 0)) {
+    cache_line_size = 16;
+  }
+  _icache_line_size = 16; // minimal line lenght CCSIDR_EL1 can hold
+  _dcache_line_size = cache_line_size;
+
   uint64_t dczid_el0;
   __asm__ (
-    "mrs %0, CTR_EL0\n"
-    "mrs %1, DCZID_EL0\n"
-    : "=r"(ctr_el0), "=r"(dczid_el0)
+    "mrs %0, DCZID_EL0\n"
+    : "=r"(dczid_el0)
   );
-
-  _icache_line_size = (1 << (ctr_el0 & 0x0f)) * 4;
-  _dcache_line_size = (1 << ((ctr_el0 >> 16) & 0x0f)) * 4;
-
   if (!(dczid_el0 & 0x10)) {
     _zva_length = 4 << (dczid_el0 & 0xf);
   }
-
-  if (FILE *f = fopen("/proc/cpuinfo", "r")) {
-    // need a large buffer as the flags line may include lots of text
-    char buf[1024], *p;
-    while (fgets(buf, sizeof (buf), f) != NULL) {
-      if ((p = strchr(buf, ':')) != NULL) {
-        long v = strtol(p+1, NULL, 0);
-        if (strncmp(buf, "CPU implementer", sizeof "CPU implementer" - 1) == 0) {
-          _cpu = v;
-        } else if (strncmp(buf, "CPU variant", sizeof "CPU variant" - 1) == 0) {
-          _variant = v;
-        } else if (strncmp(buf, "CPU part", sizeof "CPU part" - 1) == 0) {
-          if (_model != v)  _model2 = _model;
-          _model = v;
-        } else if (strncmp(buf, "CPU revision", sizeof "CPU revision" - 1) == 0) {
-          _revision = v;
-        }
-      }
-    }
-    fclose(f);
-  }
+  int family;
+  sysctllen = sizeof(family);
+  if (sysctlbyname("hw.cpufamily", &family, &sysctllen, NULL, 0)) {
+    family = 0;
+   }
+  _model = family;
+  _cpu = CPU_APPLE;
 }
+
+#ifdef __APPLE__
+
+bool VM_Version::is_cpu_emulated() {
+  return false;
+}
+
+#endif

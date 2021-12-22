@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 1999, 2018, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2014, Red Hat Inc. All rights reserved.
+ * Copyright (c) 2021, Azul Systems, Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -32,10 +33,10 @@
 #include "code/codeCache.hpp"
 #include "code/icBuffer.hpp"
 #include "code/vtableStubs.hpp"
-#include "code/nativeInst.hpp"
 #include "interpreter/interpreter.hpp"
+#include "logging/log.hpp"
 #include "memory/allocation.inline.hpp"
-#include "os_share_linux.hpp"
+#include "os_share_bsd.hpp"
 #include "prims/jniFastGetField.hpp"
 #include "prims/jvm_misc.hpp"
 #include "runtime/arguments.hpp"
@@ -50,7 +51,7 @@
 #include "runtime/stubRoutines.hpp"
 #include "runtime/thread.inline.hpp"
 #include "runtime/timer.hpp"
-#include "utilities/debug.hpp"
+#include "utilities/align.hpp"
 #include "utilities/events.hpp"
 #include "utilities/vmError.hpp"
 
@@ -65,7 +66,6 @@
 # include <stdio.h>
 # include <unistd.h>
 # include <sys/resource.h>
-# include <pthread.h>
 # include <sys/stat.h>
 # include <sys/time.h>
 # include <sys/utsname.h>
@@ -73,14 +73,41 @@
 # include <sys/wait.h>
 # include <pwd.h>
 # include <poll.h>
-# include <ucontext.h>
-# include <fpu_control.h>
+#ifndef __OpenBSD__
+ # include <ucontext.h>
+#endif
 
-#define REG_FP 29
-#define REG_LR 30
+#if !defined(__APPLE__) && !defined(__NetBSD__)
+# include <pthread_np.h>
+#endif
 
-NOINLINE address os::current_stack_pointer() {
-  return (address)__builtin_frame_address(0);
+#define SPELL_REG_SP "sp"
+#define SPELL_REG_FP "fp"
+
+#ifdef __APPLE__
+// see darwin-xnu/osfmk/mach/arm/_structs.h
+
+// 10.5 UNIX03 member name prefixes
+#define DU3_PREFIX(s, m) __ ## s.__ ## m
+#endif
+
+#define context_x    uc_mcontext->DU3_PREFIX(ss,x)
+#define context_fp   uc_mcontext->DU3_PREFIX(ss,fp)
+#define context_lr   uc_mcontext->DU3_PREFIX(ss,lr)
+#define context_sp   uc_mcontext->DU3_PREFIX(ss,sp)
+#define context_pc   uc_mcontext->DU3_PREFIX(ss,pc)
+#define context_cpsr uc_mcontext->DU3_PREFIX(ss,cpsr)
+#define context_esr  uc_mcontext->DU3_PREFIX(es,esr)
+
+address os::current_stack_pointer() {
+#if defined(__clang__) || defined(__llvm__)
+  void *sp;
+  __asm__("mov %0, " SPELL_REG_SP : "=r"(sp));
+  return (address) sp;
+#else
+  register void *sp __asm__ (SPELL_REG_SP);
+  return (address) sp;
+#endif
 }
 
 char* os::non_memory_address_word() {
@@ -88,23 +115,25 @@ char* os::non_memory_address_word() {
   // even in its subfields (as defined by the CPU immediate fields,
   // if the CPU splits constants across multiple instructions).
 
+  // the return value used in computation of Universe::non_oop_word(), which
+  // is loaded by cpu/aarch64 by MacroAssembler::movptr(Register, uintptr_t)
   return (char*) 0xffffffffffff;
 }
 
-address os::Linux::ucontext_get_pc(const ucontext_t * uc) {
-  return (address)uc->uc_mcontext.pc;
+address os::Bsd::ucontext_get_pc(const ucontext_t * uc) {
+  return (address)uc->context_pc;
 }
 
-void os::Linux::ucontext_set_pc(ucontext_t * uc, address pc) {
-  uc->uc_mcontext.pc = (intptr_t)pc;
+void os::Bsd::ucontext_set_pc(ucontext_t * uc, address pc) {
+  uc->context_pc = (intptr_t)pc;
 }
 
-intptr_t* os::Linux::ucontext_get_sp(const ucontext_t * uc) {
-  return (intptr_t*)uc->uc_mcontext.sp;
+intptr_t* os::Bsd::ucontext_get_sp(const ucontext_t * uc) {
+  return (intptr_t*)uc->context_sp;
 }
 
-intptr_t* os::Linux::ucontext_get_fp(const ucontext_t * uc) {
-  return (intptr_t*)uc->uc_mcontext.regs[REG_FP];
+intptr_t* os::Bsd::ucontext_get_fp(const ucontext_t * uc) {
+  return (intptr_t*)uc->context_fp;
 }
 
 // For Forte Analyzer AsyncGetCallTrace profiling support - thread
@@ -112,7 +141,7 @@ intptr_t* os::Linux::ucontext_get_fp(const ucontext_t * uc) {
 // os::Solaris::fetch_frame_from_ucontext() tries to skip nested signal
 // frames. Currently we don't do that on Linux, so it's the same as
 // os::fetch_frame_from_context().
-ExtendedPC os::Linux::fetch_frame_from_ucontext(Thread* thread,
+ExtendedPC os::Bsd::fetch_frame_from_ucontext(Thread* thread,
   const ucontext_t* uc, intptr_t** ret_sp, intptr_t** ret_fp) {
 
   assert(thread != NULL, "just checking");
@@ -129,9 +158,9 @@ ExtendedPC os::fetch_frame_from_context(const void* ucVoid,
   const ucontext_t* uc = (const ucontext_t*)ucVoid;
 
   if (uc != NULL) {
-    epc = ExtendedPC(os::Linux::ucontext_get_pc(uc));
-    if (ret_sp) *ret_sp = os::Linux::ucontext_get_sp(uc);
-    if (ret_fp) *ret_fp = os::Linux::ucontext_get_fp(uc);
+    epc = ExtendedPC(os::Bsd::ucontext_get_pc(uc));
+    if (ret_sp) *ret_sp = os::Bsd::ucontext_get_sp(uc);
+    if (ret_fp) *ret_fp = os::Bsd::ucontext_get_fp(uc);
   } else {
     // construct empty ExtendedPC for return value checking
     epc = ExtendedPC(NULL);
@@ -149,8 +178,8 @@ frame os::fetch_frame_from_context(const void* ucVoid) {
   return frame(sp, fp, epc.pc());
 }
 
-bool os::Linux::get_frame_at_stack_banging_point(JavaThread* thread, ucontext_t* uc, frame* fr) {
-  address pc = (address) os::Linux::ucontext_get_pc(uc);
+bool os::Bsd::get_frame_at_stack_banging_point(JavaThread* thread, ucontext_t* uc, frame* fr) {
+  address pc = (address) os::Bsd::ucontext_get_pc(uc);
   if (Interpreter::contains(pc)) {
     // interpreter performs stack banging after the fixed frame header has
     // been generated while the compilers perform it before. To maintain
@@ -173,9 +202,9 @@ bool os::Linux::get_frame_at_stack_banging_point(JavaThread* thread, ucontext_t*
       // In compiled code, the stack banging is performed before LR
       // has been saved in the frame.  LR is live, and SP and FP
       // belong to the caller.
-      intptr_t* fp = os::Linux::ucontext_get_fp(uc);
-      intptr_t* sp = os::Linux::ucontext_get_sp(uc);
-      address pc = (address)(uc->uc_mcontext.regs[REG_LR]
+      intptr_t* fp = os::Bsd::ucontext_get_fp(uc);
+      intptr_t* sp = os::Bsd::ucontext_get_sp(uc);
+      address pc = (address)(uc->context_lr
                          - NativeInstruction::instruction_size);
       *fr = frame(sp, fp, pc);
       if (!fr->is_java_frame()) {
@@ -189,8 +218,7 @@ bool os::Linux::get_frame_at_stack_banging_point(JavaThread* thread, ucontext_t*
   return true;
 }
 
-// By default, gcc always saves frame pointer rfp on this stack. This
-// may get turned off by -fomit-frame-pointer.
+// JVM compiled with -fno-omit-frame-pointer, so RFP is saved on the stack.
 frame os::get_sender_for_C_frame(frame* fr) {
   return frame(fr->link(), fr->link(), fr->sender_pc());
 }
@@ -210,7 +238,7 @@ NOINLINE frame os::current_frame() {
 
 // Utility functions
 extern "C" JNIEXPORT int
-JVM_handle_linux_signal(int sig,
+JVM_handle_bsd_signal(int sig,
                         siginfo_t* info,
                         void* ucVoid,
                         int abort_if_unrecognized) {
@@ -227,13 +255,13 @@ JVM_handle_linux_signal(int sig,
   // Note: it's not uncommon that JNI code uses signal/sigset to install
   // then restore certain signal handler (e.g. to temporarily block SIGPIPE,
   // or have a SIGILL handler when detecting CPU type). When that happens,
-  // JVM_handle_linux_signal() might be invoked with junk info/ucVoid. To
+  // JVM_handle_bsd_signal() might be invoked with junk info/ucVoid. To
   // avoid unnecessary crash when libjsig is not preloaded, try handle signals
   // that do not require siginfo/ucontext first.
 
   if (sig == SIGPIPE || sig == SIGXFSZ) {
     // allow chained handler to go first
-    if (os::Linux::chained_handler(sig, info, ucVoid)) {
+    if (os::Bsd::chained_handler(sig, info, ucVoid)) {
       return true;
     } else {
       // Ignoring SIGPIPE/SIGXFSZ - see bugs 4229104 or 6499219
@@ -251,7 +279,7 @@ JVM_handle_linux_signal(int sig,
 
   JavaThread* thread = NULL;
   VMThread* vmthread = NULL;
-  if (os::Linux::signal_handlers_are_installed) {
+  if (os::Bsd::signal_handlers_are_installed) {
     if (t != NULL ){
       if(t->is_Java_thread()) {
         thread = (JavaThread*)t;
@@ -264,22 +292,13 @@ JVM_handle_linux_signal(int sig,
 
   // Handle SafeFetch faults:
   if (uc != NULL) {
-    address const pc = (address) os::Linux::ucontext_get_pc(uc);
+    address const pc = (address) os::Bsd::ucontext_get_pc(uc);
     if (pc && StubRoutines::is_safefetch_fault(pc)) {
-      os::Linux::ucontext_set_pc(uc, StubRoutines::continuation_for_safefetch_fault(pc));
+      os::Bsd::ucontext_set_pc(uc, StubRoutines::continuation_for_safefetch_fault(pc));
       return 1;
     }
   }
 
-/*
-  NOTE: does not seem to work on linux.
-  if (info == NULL || info->si_code <= 0 || info->si_code == SI_NOINFO) {
-    // can't decode this kind of signal
-    info = NULL;
-  } else {
-    assert(sig == info->si_signo, "bad siginfo");
-  }
-*/
   // decide if this trap can be handled by a stub
   address stub = NULL;
 
@@ -287,20 +306,21 @@ JVM_handle_linux_signal(int sig,
 
   //%note os_trap_1
   if (info != NULL && uc != NULL && thread != NULL) {
-    pc = (address) os::Linux::ucontext_get_pc(uc);
+    pc = (address) os::Bsd::ucontext_get_pc(uc);
 
     // Handle ALL stack overflow variations here
-    if (sig == SIGSEGV) {
+    if (sig == SIGSEGV || sig == SIGBUS) {
       address addr = (address) info->si_addr;
 
       // check if fault address is within thread stack
       if (thread->on_local_stack(addr)) {
+        ThreadWXEnable wx(WXWrite, thread);
         // stack overflow
         if (thread->in_stack_yellow_reserved_zone(addr)) {
           if (thread->thread_state() == _thread_in_Java) {
             if (thread->in_stack_reserved_zone(addr)) {
               frame fr;
-              if (os::Linux::get_frame_at_stack_banging_point(thread, uc, &fr)) {
+              if (os::Bsd::get_frame_at_stack_banging_point(thread, uc, &fr)) {
                 assert(fr.is_java_frame(), "Must be a Java frame");
                 frame activation =
                   SharedRuntime::look_for_reserved_stack_annotated_method(thread, fr);
@@ -330,50 +350,43 @@ JVM_handle_linux_signal(int sig,
           // to handle_unexpected_exception way down below.
           thread->disable_stack_red_zone();
           tty->print_raw_cr("An irrecoverable stack overflow has occurred.");
-
-          // This is a likely cause, but hard to verify. Let's just print
-          // it as a hint.
-          tty->print_raw_cr("Please check if any of your loaded .so files has "
-                            "enabled executable stack (see man page execstack(8))");
-        } else {
-          // Accessing stack address below sp may cause SEGV if current
-          // thread has MAP_GROWSDOWN stack. This should only happen when
-          // current thread was created by user code with MAP_GROWSDOWN flag
-          // and then attached to VM. See notes in os_linux.cpp.
-          if (thread->osthread()->expanding_stack() == 0) {
-             thread->osthread()->set_expanding_stack();
-             if (os::Linux::manually_expand_stack(thread, addr)) {
-               thread->osthread()->clear_expanding_stack();
-               return 1;
-             }
-             thread->osthread()->clear_expanding_stack();
-          } else {
-             fatal("recursive segv. expanding stack.");
-          }
         }
       }
     }
 
-    if (thread->thread_state() == _thread_in_Java) {
+    // We test if stub is already set (by the stack overflow code
+    // above) so it is not overwritten by the code that follows. This
+    // check is not required on other platforms, because on other
+    // platforms we check for SIGSEGV only or SIGBUS only, where here
+    // we have to check for both SIGSEGV and SIGBUS.
+    if (thread->thread_state() == _thread_in_Java && stub == NULL) {
       // Java thread running in Java code => find exception handler if any
       // a fault inside compiled code, the interpreter, or a stub
-
+      ThreadWXEnable wx(WXWrite, thread);
       // Handle signal from NativeJump::patch_verified_entry().
-      if ((sig == SIGILL || sig == SIGTRAP)
+      if ((sig == SIGILL)
           && nativeInstruction_at(pc)->is_sigill_zombie_not_entrant()) {
         if (TraceTraps) {
-          tty->print_cr("trap: zombie_not_entrant (%s)", (sig == SIGTRAP) ? "SIGTRAP" : "SIGILL");
+          tty->print_cr("trap: zombie_not_entrant");
         }
         stub = SharedRuntime::get_handle_wrong_method_stub();
-      } else if (sig == SIGSEGV && os::is_poll_address((address)info->si_addr)) {
+      } else if ((sig == SIGSEGV || sig == SIGBUS) && os::is_poll_address((address)info->si_addr)) {
         stub = SharedRuntime::get_poll_stub(pc);
+#if defined(__APPLE__)
+      // 32-bit Darwin reports a SIGBUS for nearly all memory access exceptions.
+      // 64-bit Darwin may also use a SIGBUS (seen with compressed oops).
+      // Catching SIGBUS here prevents the implicit SIGBUS NULL check below from
+      // being called, so only do so if the implicit NULL check is not necessary.
+      } else if (sig == SIGBUS && MacroAssembler::needs_explicit_null_check((intptr_t)info->si_addr)) {
+#else
       } else if (sig == SIGBUS /* && info->si_code == BUS_OBJERR */) {
+#endif
         // BugId 4454115: A read from a MappedByteBuffer can fault
         // here if the underlying file has been truncated.
         // Do not crash the VM in such a case.
         CodeBlob* cb = CodeCache::find_blob_unsafe(pc);
         CompiledMethod* nm = (cb != NULL) ? cb->as_compiled_method_or_null() : NULL;
-        if (nm != NULL && nm->has_unsafe_access()) {
+        if ((nm != NULL && nm->has_unsafe_access())) {
           address next_pc = pc + NativeCall::instruction_size;
           stub = SharedRuntime::handle_unsafe_access(thread, next_pc);
         }
@@ -388,12 +401,18 @@ JVM_handle_linux_signal(int sig,
                                               pc,
                                               SharedRuntime::
                                               IMPLICIT_DIVIDE_BY_ZERO);
-      } else if (sig == SIGSEGV &&
-               !MacroAssembler::needs_explicit_null_check((intptr_t)info->si_addr)) {
+#ifdef __APPLE__
+      } else if (sig == SIGFPE && info->si_code == FPE_NOOP) {
+        Unimplemented();
+#endif /* __APPLE__ */
+
+      } else if ((sig == SIGSEGV || sig == SIGBUS) &&
+                 !MacroAssembler::needs_explicit_null_check((intptr_t)info->si_addr)) {
           // Determination of interpreter/vtable stub/compiled code null exception
           stub = SharedRuntime::continuation_for_implicit_exception(thread, pc, SharedRuntime::IMPLICIT_NULL);
       }
-    } else if (thread->thread_state() == _thread_in_vm &&
+    } else if ((thread->thread_state() == _thread_in_vm ||
+                 thread->thread_state() == _thread_in_native) &&
                sig == SIGBUS && /* info->si_code == BUS_OBJERR && */
                thread->doing_unsafe_access()) {
       address next_pc = pc + NativeCall::instruction_size;
@@ -425,12 +444,12 @@ JVM_handle_linux_signal(int sig,
     // save all thread context in case we need to restore it
     if (thread != NULL) thread->set_saved_exception_pc(pc);
 
-    os::Linux::ucontext_set_pc(uc, stub);
+    os::Bsd::ucontext_set_pc(uc, stub);
     return true;
   }
 
   // signal-chaining
-  if (os::Linux::chained_handler(sig, info, ucVoid)) {
+  if (os::Bsd::chained_handler(sig, info, ucVoid)) {
      return true;
   }
 
@@ -440,7 +459,7 @@ JVM_handle_linux_signal(int sig,
   }
 
   if (pc == NULL && uc != NULL) {
-    pc = os::Linux::ucontext_get_pc(uc);
+    pc = os::Bsd::ucontext_get_pc(uc);
   }
 
   // unmask current signal
@@ -455,20 +474,7 @@ JVM_handle_linux_signal(int sig,
   return true; // Mute compiler
 }
 
-void os::Linux::init_thread_fpu_state(void) {
-}
-
-int os::Linux::get_fpu_control_word(void) {
-  return 0;
-}
-
-void os::Linux::set_fpu_control_word(int fpu_control) {
-}
-
-// Check that the linux kernel version is 2.4 or higher since earlier
-// versions do not support SSE without patches.
-bool os::supports_sse() {
-  return true;
+void os::Bsd::init_thread_fpu_state(void) {
 }
 
 bool os::is_allocatable(size_t bytes) {
@@ -491,6 +497,61 @@ size_t os::Posix::default_stack_size(os::ThreadType thr_type) {
   return s;
 }
 
+static void current_stack_region(address * bottom, size_t * size) {
+#ifdef __APPLE__
+  pthread_t self = pthread_self();
+  void *stacktop = pthread_get_stackaddr_np(self);
+  *size = pthread_get_stacksize_np(self);
+  *bottom = (address) stacktop - *size;
+#elif defined(__OpenBSD__)
+  stack_t ss;
+  int rslt = pthread_stackseg_np(pthread_self(), &ss);
+
+  if (rslt != 0)
+    fatal("pthread_stackseg_np failed with error = %d", rslt);
+
+  *bottom = (address)((char *)ss.ss_sp - ss.ss_size);
+  *size   = ss.ss_size;
+#else
+  pthread_attr_t attr;
+
+  int rslt = pthread_attr_init(&attr);
+
+  // JVM needs to know exact stack location, abort if it fails
+  if (rslt != 0)
+    fatal("pthread_attr_init failed with error = %d", rslt);
+
+  rslt = pthread_attr_get_np(pthread_self(), &attr);
+
+  if (rslt != 0)
+    fatal("pthread_attr_get_np failed with error = %d", rslt);
+
+  if (pthread_attr_getstackaddr(&attr, (void **)bottom) != 0 ||
+    pthread_attr_getstacksize(&attr, size) != 0) {
+    fatal("Can not locate current stack attributes!");
+  }
+
+  pthread_attr_destroy(&attr);
+#endif
+  assert(os::current_stack_pointer() >= *bottom &&
+         os::current_stack_pointer() < *bottom + *size, "just checking");
+}
+
+address os::current_stack_base() {
+  address bottom;
+  size_t size;
+  current_stack_region(&bottom, &size);
+  return (bottom + size);
+}
+
+size_t os::current_stack_size() {
+  // stack size includes normal stack and HotSpot guard pages
+  address bottom;
+  size_t size;
+  current_stack_region(&bottom, &size);
+  return size;
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // helper functions for fatal error handler
 
@@ -499,21 +560,59 @@ void os::print_context(outputStream *st, const void *context) {
 
   const ucontext_t *uc = (const ucontext_t*)context;
   st->print_cr("Registers:");
-  for (int r = 0; r < 31; r++) {
-    st->print("R%-2d=", r);
-    print_location(st, uc->uc_mcontext.regs[r]);
-  }
+  st->print( " x0=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 0]);
+  st->print("  x1=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 1]);
+  st->print("  x2=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 2]);
+  st->print("  x3=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 3]);
+  st->cr();
+  st->print( " x4=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 4]);
+  st->print("  x5=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 5]);
+  st->print("  x6=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 6]);
+  st->print("  x7=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 7]);
+  st->cr();
+  st->print( " x8=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 8]);
+  st->print("  x9=" INTPTR_FORMAT, (intptr_t)uc->context_x[ 9]);
+  st->print(" x10=" INTPTR_FORMAT, (intptr_t)uc->context_x[10]);
+  st->print(" x11=" INTPTR_FORMAT, (intptr_t)uc->context_x[11]);
+  st->cr();
+  st->print( "x12=" INTPTR_FORMAT, (intptr_t)uc->context_x[12]);
+  st->print(" x13=" INTPTR_FORMAT, (intptr_t)uc->context_x[13]);
+  st->print(" x14=" INTPTR_FORMAT, (intptr_t)uc->context_x[14]);
+  st->print(" x15=" INTPTR_FORMAT, (intptr_t)uc->context_x[15]);
+  st->cr();
+  st->print( "x16=" INTPTR_FORMAT, (intptr_t)uc->context_x[16]);
+  st->print(" x17=" INTPTR_FORMAT, (intptr_t)uc->context_x[17]);
+  st->print(" x18=" INTPTR_FORMAT, (intptr_t)uc->context_x[18]);
+  st->print(" x19=" INTPTR_FORMAT, (intptr_t)uc->context_x[19]);
+  st->cr();
+  st->print( "x20=" INTPTR_FORMAT, (intptr_t)uc->context_x[20]);
+  st->print(" x21=" INTPTR_FORMAT, (intptr_t)uc->context_x[21]);
+  st->print(" x22=" INTPTR_FORMAT, (intptr_t)uc->context_x[22]);
+  st->print(" x23=" INTPTR_FORMAT, (intptr_t)uc->context_x[23]);
+  st->cr();
+  st->print( "x24=" INTPTR_FORMAT, (intptr_t)uc->context_x[24]);
+  st->print(" x25=" INTPTR_FORMAT, (intptr_t)uc->context_x[25]);
+  st->print(" x26=" INTPTR_FORMAT, (intptr_t)uc->context_x[26]);
+  st->print(" x27=" INTPTR_FORMAT, (intptr_t)uc->context_x[27]);
+  st->cr();
+  st->print( "x28=" INTPTR_FORMAT, (intptr_t)uc->context_x[28]);
+  st->print("  fp=" INTPTR_FORMAT, (intptr_t)uc->context_fp);
+  st->print("  lr=" INTPTR_FORMAT, (intptr_t)uc->context_lr);
+  st->print("  sp=" INTPTR_FORMAT, (intptr_t)uc->context_sp);
+  st->cr();
+  st->print(  "pc=" INTPTR_FORMAT,  (intptr_t)uc->context_pc);
+  st->print(" cpsr=" INTPTR_FORMAT, (intptr_t)uc->context_cpsr);
   st->cr();
 
-  intptr_t *sp = (intptr_t *)os::Linux::ucontext_get_sp(uc);
-  st->print_cr("Top of Stack: (sp=" PTR_FORMAT ")", p2i(sp));
+  intptr_t *sp = (intptr_t *)os::Bsd::ucontext_get_sp(uc);
+  st->print_cr("Top of Stack: (sp=" INTPTR_FORMAT ")", (intptr_t)sp);
   print_hex_dump(st, (address)sp, (address)(sp + 8*sizeof(intptr_t)), sizeof(intptr_t));
   st->cr();
 
   // Note: it may be unsafe to inspect memory near pc. For example, pc may
   // point to garbage if entry point in an nmethod is corrupted. Leave
   // this at the end, and hope for the best.
-  address pc = os::Linux::ucontext_get_pc(uc);
+  address pc = os::Bsd::ucontext_get_pc(uc);
   print_instructions(st, pc, sizeof(char));
   st->cr();
 }
@@ -532,8 +631,36 @@ void os::print_register_info(outputStream *st, const void *context) {
 
   // this is only for the "general purpose" registers
 
-  for (int r = 0; r < 31; r++)
-    st->print_cr(  "R%d=" INTPTR_FORMAT, r, (uintptr_t)uc->uc_mcontext.regs[r]);
+  st->print(" x0="); print_location(st, uc->context_x[ 0]);
+  st->print(" x1="); print_location(st, uc->context_x[ 1]);
+  st->print(" x2="); print_location(st, uc->context_x[ 2]);
+  st->print(" x3="); print_location(st, uc->context_x[ 3]);
+  st->print(" x4="); print_location(st, uc->context_x[ 4]);
+  st->print(" x5="); print_location(st, uc->context_x[ 5]);
+  st->print(" x6="); print_location(st, uc->context_x[ 6]);
+  st->print(" x7="); print_location(st, uc->context_x[ 7]);
+  st->print(" x8="); print_location(st, uc->context_x[ 8]);
+  st->print(" x9="); print_location(st, uc->context_x[ 9]);
+  st->print("x10="); print_location(st, uc->context_x[10]);
+  st->print("x11="); print_location(st, uc->context_x[11]);
+  st->print("x12="); print_location(st, uc->context_x[12]);
+  st->print("x13="); print_location(st, uc->context_x[13]);
+  st->print("x14="); print_location(st, uc->context_x[14]);
+  st->print("x15="); print_location(st, uc->context_x[15]);
+  st->print("x16="); print_location(st, uc->context_x[16]);
+  st->print("x17="); print_location(st, uc->context_x[17]);
+  st->print("x18="); print_location(st, uc->context_x[18]);
+  st->print("x19="); print_location(st, uc->context_x[19]);
+  st->print("x20="); print_location(st, uc->context_x[20]);
+  st->print("x21="); print_location(st, uc->context_x[21]);
+  st->print("x22="); print_location(st, uc->context_x[22]);
+  st->print("x23="); print_location(st, uc->context_x[23]);
+  st->print("x24="); print_location(st, uc->context_x[24]);
+  st->print("x25="); print_location(st, uc->context_x[25]);
+  st->print("x26="); print_location(st, uc->context_x[26]);
+  st->print("x27="); print_location(st, uc->context_x[27]);
+  st->print("x28="); print_location(st, uc->context_x[28]);
+
   st->cr();
 }
 
@@ -549,6 +676,10 @@ void os::verify_stack_alignment() {
 int os::extra_bang_size_in_bytes() {
   // AArch64 does not require the additional stack bang.
   return 0;
+}
+
+void os::current_thread_enable_wx(WXMode mode) {
+  pthread_jit_write_protect_np(mode == WXExec);
 }
 
 extern "C" {

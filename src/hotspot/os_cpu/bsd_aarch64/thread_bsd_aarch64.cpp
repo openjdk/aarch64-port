@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2021, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2014, Red Hat Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -30,6 +30,7 @@
 
 frame JavaThread::pd_last_frame() {
   assert(has_last_Java_frame(), "must have last_Java_sp() when suspended");
+  vmassert(_anchor.last_Java_pc() != NULL, "not walkable");
   return frame(_anchor.last_Java_sp(), _anchor.last_Java_fp(), _anchor.last_Java_pc());
 }
 
@@ -65,8 +66,7 @@ bool JavaThread::pd_get_top_frame(frame* fr_addr, void* ucontext, bool isInJava)
 
     intptr_t* ret_fp;
     intptr_t* ret_sp;
-    ExtendedPC addr = os::Linux::fetch_frame_from_ucontext(this, uc,
-      &ret_sp, &ret_fp);
+    ExtendedPC addr = os::fetch_frame_from_context(uc, &ret_sp, &ret_fp);
     if (addr.pc() == NULL || ret_sp == NULL ) {
       // ucontext wasn't useful
       return false;
